@@ -197,70 +197,75 @@ def test_page_content_is_wrapped_as_untrusted_data(direct_vm, direct_deploy, dir
 
 
 # ---------------------------------------------------------------------------
-# Custom validator consensus: partial (>= 80%) per-rule agreement, not
-# whole-answer equality and not unanimous agreement.
+# Custom validator consensus: the validator must agree with the leader on
+# every rule that can influence the stored result (any rule with weight > 0).
+# Only disabled rules (weight 0) may differ.
 # ---------------------------------------------------------------------------
 
 
-def test_validator_accepts_when_enough_rules_match(direct_vm, direct_deploy, direct_owner):
-    c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
-    for i in range(5):
-        c.add_rule(f"Rule {i}", 20, 0)
-
+def run_leader(direct_vm, c, results):
     direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS"] * 5))
-    c.submit_for_review("https://example.com/repo")  # leader: all PASS, captured
+    direct_vm.mock_llm(r".*", verdicts_json(results))
+    c.submit_for_review("https://example.com/repo")
 
-    # Validator independently re-derives and disagrees on exactly one rule
-    # out of five (matches = 4). required_matches for 5 rules = ceil(4) = 4.
+
+def swap_validator_view(direct_vm, results):
     direct_vm.clear_mocks()
     direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS", "PASS", "PASS", "PASS", "FAIL"]))
+    direct_vm.mock_llm(r".*", verdicts_json(results))
+
+
+def test_validator_accepts_identical_verdicts(direct_vm, direct_deploy, direct_owner):
+    c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
+    for i in range(3):
+        c.add_rule(f"Rule {i}", 30, 0)
+    run_leader(direct_vm, c, ["PASS", "FAIL", "PASS"])
+    swap_validator_view(direct_vm, ["PASS", "FAIL", "PASS"])
     assert direct_vm.run_validator() is True
 
 
-def test_validator_rejects_when_too_few_rules_match(direct_vm, direct_deploy, direct_owner):
+def test_validator_rejects_mandatory_disagreement_even_if_most_rules_match(
+    direct_vm, direct_deploy, direct_owner
+):
+    """Reviewer's counter-example: 4 of 5 rules agree, the one that disagrees
+    is mandatory. The old 80% rule accepted this and let the leader store
+    READY while the validator's own judgment implied NEEDS_WORK."""
+    c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
+    for i in range(4):
+        c.add_rule(f"Advisory rule {i}", 20, 0)
+    c.add_rule("Mandatory rule", 20, 1)  # id 4
+    run_leader(direct_vm, c, ["PASS"] * 5)
+    swap_validator_view(direct_vm, ["PASS", "PASS", "PASS", "PASS", "FAIL"])
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_any_disagreement_on_a_weighted_rule(
+    direct_vm, direct_deploy, direct_owner
+):
     c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
     for i in range(5):
         c.add_rule(f"Rule {i}", 20, 0)
-
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS"] * 5))
-    c.submit_for_review("https://example.com/repo")
-
-    # Validator disagrees on two out of five rules (matches = 3 < 4 required).
-    direct_vm.clear_mocks()
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS", "PASS", "PASS", "FAIL", "FAIL"]))
+    run_leader(direct_vm, c, ["PASS"] * 5)
+    # a single weighted flip changes the score, so it must not be tolerated
+    swap_validator_view(direct_vm, ["PASS", "PASS", "PASS", "PASS", "FAIL"])
     assert direct_vm.run_validator() is False
 
 
-def test_small_rubric_requires_exact_match(direct_vm, direct_deploy, direct_owner):
+def test_validator_tolerates_disagreement_only_on_disabled_rules(
+    direct_vm, direct_deploy, direct_owner
+):
     c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
-    c.add_rule("Rule A", 50, 0)
-    c.add_rule("Rule B", 50, 0)
-
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS", "PASS"]))
-    c.submit_for_review("https://example.com/repo")
-
-    # 2-rule rubric: required_matches = ceil(2 * 4 / 5) = 2 -- one mismatch
-    # (matches = 1) must already be rejected, no partial credit at this size.
-    direct_vm.clear_mocks()
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS", "FAIL"]))
-    assert direct_vm.run_validator() is False
+    c.add_rule("Active rule", 50, 0)
+    c.add_rule("Disabled rule", 50, 1)
+    c.update_rule(1, "Disabled rule", 0, 1)  # weight 0: inert even if mandatory
+    run_leader(direct_vm, c, ["PASS", "PASS"])
+    swap_validator_view(direct_vm, ["PASS", "FAIL"])
+    assert direct_vm.run_validator() is True
 
 
 def test_validator_rejects_malformed_leader_shape(direct_vm, direct_deploy, direct_owner):
     c = deploy(direct_vm, direct_deploy, direct_owner, threshold=0)
     c.add_rule("Rule A", 100, 0)
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS"]))
-    c.submit_for_review("https://example.com/repo")
-
-    direct_vm.clear_mocks()
-    direct_vm.mock_web(r".*", {"status": 200, "body": "content"})
-    direct_vm.mock_llm(r".*", verdicts_json(["PASS"]))
-    # a leader that errored out must never be accepted
+    run_leader(direct_vm, c, ["PASS"])
+    swap_validator_view(direct_vm, ["PASS"])
     assert direct_vm.run_validator(leader_error=Exception("boom")) is False
