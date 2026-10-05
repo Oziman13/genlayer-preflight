@@ -20,23 +20,23 @@ from genlayer import *
 #
 # Consensus design
 # -----------------
-# A generic gl.eq_principle.prompt_comparative call would ask "do these two
+# A generic gl.eq_principle.prompt_comparative call asks "do these two
 # free-text answers mean the same thing", which is the wrong question for a
-# multi-rule review: two honest re-runs of the same rubric against the same
-# page will often flip one borderline rule while agreeing on the rest, and
-# a whole-answer equivalence check has no way to say "close enough".
+# multi-rule review: it has no notion of which disagreements matter.
 #
 # Instead this contract defines its own leader/validator pair through
 # gl.vm.run_nondet_unsafe. The leader judges every rule and returns a
 # structured, index-aligned PASS/FAIL list. Each validator independently
 # re-fetches the same URL and re-judges the same rubric on its own, then
-# accepts the leader only if enough of its own per-rule verdicts match the
-# leader's -- not all of them, and not just one. "Enough" is
-# ceil(80% of the rule count), so a rubric with 5 rules tolerates one
-# disagreement, and a 1-2 rule rubric still requires an exact match. This
-# is the "thoughtful equivalence check" the category asks for: consensus
-# on stable, discrete outcomes rather than on exact wording or a coarse
-# single yes/no.
+# accepts the leader only if their verdicts agree on EVERY rule that can
+# influence the stored result. Any rule with weight > 0 can change the
+# score, the threshold outcome, or (when mandatory) force NEEDS_WORK, so a
+# single disagreement on such a rule rejects the leader. Only disabled
+# rules (weight 0), which the aggregation below skips entirely, may
+# differ: they provably cannot change the outcome. Consensus is therefore
+# bound to the final result itself, not to an "enough rules matched"
+# percentage that could wave through a leader whose mandatory-rule verdict
+# contradicts the validator's own judgment.
 #
 # Once that structured verdict list is agreed on, everything downstream
 # (bucketing by weight, checking mandatory rules, computing the score,
@@ -61,22 +61,6 @@ MAX_RULE_LENGTH = 400
 MAX_RULES = 20
 MAX_URL_LENGTH = 500
 MAX_FETCH_CHARS = 6000  # keeps the prompt (and its cost) bounded
-AGREEMENT_NUM = 4
-AGREEMENT_DEN = 5  # a validator must match >= 80% of the leader's per-rule verdicts
-
-
-def _required_matches(rule_count: int) -> int:
-    """How many of the leader's per-rule verdicts a validator must match.
-
-    Ceiling of rule_count * 80%, but never less than 1 and never more than
-    rule_count itself -- so a 1- or 2-rule rubric still needs an exact
-    match, while a larger rubric tolerates the occasional borderline call
-    flipping between two honest, independent re-runs.
-    """
-    if rule_count <= 0:
-        return 0
-    needed = -(-(rule_count * AGREEMENT_NUM) // AGREEMENT_DEN)  # ceil division
-    return max(1, min(rule_count, needed))
 
 
 def _fetch_and_judge(url: str, rule_ids: list, rule_texts: list) -> dict:
@@ -252,7 +236,6 @@ class Preflight(gl.Contract):
         rule_weights = [int(self.rule_weight[u32(i)]) for i in rule_ids]
         rule_mandatory = [int(self.rule_mandatory[u32(i)]) == 1 for i in rule_ids]
         rubric_version_snapshot = int(self.rubric_version)
-        required_matches = _required_matches(rule_count)
 
         def leader_fn():
             return _fetch_and_judge(cleaned_url, rule_ids, rule_texts)
@@ -263,11 +246,13 @@ class Preflight(gl.Contract):
             leader_verdicts = leader_result.calldata.get("verdicts")
             if not isinstance(leader_verdicts, list) or len(leader_verdicts) != rule_count:
                 return False
-            mine = _fetch_and_judge(cleaned_url, rule_ids, rule_texts)
-            matches = sum(
-                1 for a, b in zip(leader_verdicts, mine["verdicts"]) if a == b
-            )
-            return matches >= required_matches
+            mine = _fetch_and_judge(cleaned_url, rule_ids, rule_texts)["verdicts"]
+            for i in rule_ids:
+                if rule_weights[i] <= 0:
+                    continue  # disabled rule: cannot affect score or verdict
+                if leader_verdicts[i] != mine[i]:
+                    return False  # a consequential rule disagrees
+            return True
 
         outcome = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         verdicts = outcome["verdicts"]
