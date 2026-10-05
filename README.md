@@ -39,9 +39,7 @@ against.
 
 A generic `gl.eq_principle.prompt_comparative` call asks "do these two
 free-text answers mean the same thing", which is the wrong question for a
-multi-rule review: two honest re-runs of the same rubric against the same
-page will often flip one borderline rule while agreeing on the rest, and a
-whole-answer equivalence check has no way to say "close enough".
+multi-rule review: it has no notion of *which* disagreements matter.
 
 Instead, Preflight defines its own leader/validator pair through
 `gl.vm.run_nondet_unsafe`:
@@ -50,15 +48,21 @@ Instead, Preflight defines its own leader/validator pair through
    PASS/FAIL list.
 2. Each **validator** independently re-fetches the same URL and re-judges
    the same rubric on its own.
-3. A validator accepts the leader only if **enough of its own per-rule
-   verdicts match the leader's** -- not all of them, and not just one.
-   "Enough" is `ceil(80% of the rule count)`, so a 5-rule rubric tolerates
-   one disagreement, while a 1- or 2-rule rubric still requires an exact
-   match.
+3. A validator accepts the leader only if their verdicts agree on **every
+   rule that can influence the stored result**. Any rule with `weight > 0`
+   can change the score, the threshold outcome, or (when mandatory) force
+   `NEEDS_WORK`, so a single disagreement on such a rule rejects the
+   leader. Only **disabled rules (weight 0)** may differ, because the
+   aggregation skips them entirely and they provably cannot change the
+   outcome.
 
-This is the "thoughtful equivalence check" a rubric-based reviewer needs:
-consensus on stable, discrete outcomes, not on exact wording, and not on a
-single coarse yes/no.
+Consensus is therefore bound to the final result itself. An earlier
+iteration accepted "at least 80% of rules match", which a reviewer
+correctly pointed out could wave through a leader whose *mandatory*-rule
+verdict contradicted the validator's own judgment (4 of 5 rules agree, the
+disagreeing one is mandatory, so the leader stores `READY` while the
+validator's judgment implies `NEEDS_WORK`). That counter-example is now a
+regression test.
 
 ## Contract interface
 
@@ -103,12 +107,9 @@ canonicalization), and rubric versioning.
 validation, deterministic score/verdict aggregation, mandatory-rule
 overrides, malformed-LLM-output fallback, rubric-version pinning, the
 prompt-injection wrapper actually being sent, and -- using `mock_web`,
-`mock_llm`, and `run_validator` -- the custom 80%-agreement consensus logic
-itself: accepting a validator that disagrees on one rule out of five,
-rejecting one that disagrees on two, and requiring an exact match on a
-2-rule rubric.
+`mock_llm`, and `run_validator` -- the custom consensus logic itself: identical verdicts are accepted; any disagreement on a weighted rule is rejected; the reviewer's mandatory-rule counter-example (4 of 5 agree, the mandatory one doesn't) is rejected; and disagreement is tolerated only on disabled (weight 0) rules.
 
-28/28 tests pass.
+29/29 tests pass.
 
 ## Deployed on GenLayer Studio testnet
 
