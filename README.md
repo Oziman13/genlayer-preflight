@@ -13,6 +13,58 @@ per-rule verdicts into a deterministic weighted score and a `READY` /
 `NEEDS_WORK` decision, pinned to the exact rubric version it was judged
 against.
 
+## Live app
+
+**Try it:** https://oziman13.github.io/genlayer-preflight/ (reading needs no wallet)
+
+| | |
+|---|---|
+| Network | GenLayer Studionet |
+| Chain ID | 61999 |
+| RPC | https://studio.genlayer.com/api |
+| Contract | `0x1B1838955D84b48d0b548C278759f58b0dD6ae83` |
+| Explorer | https://explorer-studio.genlayer.com/address/0x1B1838955D84b48d0b548C278759f58b0dD6ae83 |
+
+The app is a single static page (`index.html`) built on the official
+`genlayer-js` SDK (loaded from jsDelivr). There is no backend: every number on
+the page is read from the contract, and every verdict is written by it.
+
+**How the flow works**
+1. The page reads the program name, pass threshold, rubric and past
+   submissions straight from the contract.
+2. Connect a browser wallet. The page switches it to GenLayer Studionet.
+3. Submit a public URL. The page estimates fees where the network supports it,
+   sends `submit_for_review`, and waits for the validators' decision.
+4. It then checks that the contract call itself succeeded (an accepted
+   transaction alone does not prove that) and re-reads the submissions.
+   Pending, success and failure states are all shown, and a failed submission
+   can be retried.
+
+**Sample results already on-chain**
+
+| Submitted URL | Verdict | Score | Rule 0 (source public) | Rule 1 (README explains consensus) | Rule 2 (has tests) |
+|---|---|---|---|---|---|
+| this repository | READY | 100 | PASS | PASS | PASS |
+| `genlayer-community-pulse` | NEEDS_WORK | 40 | PASS | FAIL | FAIL |
+
+The second row is the point: the same rubric that approves a repository with a
+README and tests rejects one without them.
+
+**Run it locally:** open `index.html` in a browser. No build step.
+
+**Known limitations**
+- Studionet is a hosted development network and can be reset, which would
+  clear the on-chain history shown in the app.
+- Verdicts are LLM judgments against the rubric. They are not proof that the
+  work is correct.
+- A review takes a minute or more, because the page is fetched and judged by
+  several validators. Only public pages can be reviewed.
+- The app does not yet let the program owner edit the rubric; that is done
+  through the contract methods directly.
+
+**Roadmap:** deploy on Bradbury, add rubric editing for the owner, show a fee
+quote before signing.
+
 ## Why this is more than a thin LLM wrapper
 
 - **Structured, multi-criteria judgment**, not a single yes/no. Every rule is
@@ -111,10 +163,8 @@ prompt-injection wrapper actually being sent, and -- using `mock_web`,
 
 29/29 tests pass.
 
-## Deployed on GenLayer Studio testnet
+## Deploying your own
 
-Constructor: `Preflight(program_name: str, pass_threshold_percent: int)`
-
-A live instance, configured for the Portal's own "Intelligent Contracts"
-rubric (source readable, README explains consensus, has automated tests),
-is linked in the GitHub repo description / Portal submission evidence.
+Constructor: `Preflight(program_name: str, pass_threshold_percent: int)`.
+After deploying, the owner adds rules with `add_rule(text, weight, mandatory)`.
+The live instance used by the app is listed under "Live app" above.
